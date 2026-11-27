@@ -74,14 +74,20 @@ def test_prefix_is_invariant_to_future(filter_cls: type, strategy_cls: type) -> 
         strategy = strategy_cls(surprise_scale=1.0, surprise_threshold=0.5, regime_cutoff=0.8)
         # Fit on the shared prefix only, then replay the whole path online.
         filt.fit(frame.iloc[: t_cut + 1])
+        if isinstance(filt, HMMFilter):
+            assert filt.stds_ is not None
+            assert filt.stds_[1] >= filt.stds_[0]
         result = run_backtest(frame, filt, strategy, fee_bps=1.5)
-        return _state_matrix(result.states[: t_cut + 1]), result.positions[: t_cut + 1].copy()
+        return _state_matrix(result.states), result.positions.copy()
 
     states_a, positions_a = run(original)
     states_b, positions_b = run(perturbed)
-    np.testing.assert_allclose(states_a, states_b, atol=0.0, rtol=0.0)
-    np.testing.assert_allclose(positions_a, positions_b, atol=0.0, rtol=0.0)
-    assert states_a.shape[0] == t_cut + 1
+    prefix = slice(0, t_cut + 1)
+    tail = slice(t_cut + 1, None)
+    np.testing.assert_allclose(states_a[prefix], states_b[prefix], atol=0.0, rtol=0.0)
+    np.testing.assert_allclose(positions_a[prefix], positions_b[prefix], atol=0.0, rtol=0.0)
+    assert states_a[tail].shape[0] > 0
+    assert not np.allclose(states_a[tail], states_b[tail], atol=0.0, rtol=0.0)
 
 
 def _batch_forward_and_smooth(
@@ -131,6 +137,7 @@ def test_hmm_matches_forward_algorithm_not_smoother() -> None:
         online[t] = filt.update(bar).regime_prob
     assert filt.means_ is not None
     assert filt.stds_ is not None
+    assert filt.stds_[1] >= filt.stds_[0]
     assert filt.transmat_ is not None
     assert filt.startprob_ is not None
     forward, smoothed = _batch_forward_and_smooth(

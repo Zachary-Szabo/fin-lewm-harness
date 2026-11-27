@@ -31,9 +31,10 @@ class FilterState:
 
     ``regime_prob`` is the filtered probability of the high-volatility
     state. Filters without a regime latent (identity, Kalman) report 0.
-    ``surprise`` is a non-negative-or-signed innovation score defined by
-    each filter (absolute standardized innovation, or negative log
-    likelihood). ``pred_vol`` is that filter's volatility estimate.
+    ``surprise`` is the training-set z-score of that filter's raw score
+    (absolute return over trailing vol, absolute Kalman innovation, or
+    HMM negative log likelihood). ``pred_vol`` is that filter's
+    volatility estimate in its native units.
     """
 
     filtered_price: float

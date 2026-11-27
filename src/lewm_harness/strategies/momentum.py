@@ -20,7 +20,9 @@ class MomentumStrategy(Strategy):
     ``(fast - slow) / (|slow| * signal_scale)``, clipped to ``[-1, 1]``.
     ``signal_scale`` is the relative gap that maps to a full position
     (default 1%). The signal stays 0 until ``slow`` observations have been
-    seen, so the startup transient is not traded.
+    seen, so the startup transient is not traded. ``regime_cutoff``
+    defaults to ``None``: a high-vol trend is when this book is supposed
+    to stay on, so the overlay does not pause it.
     """
 
     def __init__(
@@ -32,6 +34,8 @@ class MomentumStrategy(Strategy):
         surprise_scale: float = 1.0,
         surprise_threshold: float = 0.0,
         regime_cutoff: float | None = None,
+        target_vol: float | None = None,
+        vol_eps: float = 1e-8,
     ) -> None:
         if fast < 1 or slow <= fast:
             raise ValueError("require 1 <= fast < slow")
@@ -41,6 +45,8 @@ class MomentumStrategy(Strategy):
             surprise_scale=surprise_scale,
             surprise_threshold=surprise_threshold,
             regime_cutoff=regime_cutoff,
+            target_vol=target_vol,
+            vol_eps=vol_eps,
         )
         self.fast = fast
         self.slow = slow

@@ -54,6 +54,8 @@ def run_monte_carlo(
 
     Path ``i`` is ``generator(n_steps, seed + i)``. The first
     ``train_frac`` of each path is the fit sample; the rest is the test.
+    ``periods_per_year`` is forwarded to ``compute_metrics`` (252 for
+    daily bars; pass ``252 * 390`` for a 1-minute equity session).
     """
 
     if n_paths < 1:

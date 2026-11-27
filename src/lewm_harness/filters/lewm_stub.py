@@ -20,8 +20,10 @@ class LeWMFilter(RegimeFilter):
     * ``reset`` clears recurrent latent state.
     * ``update`` consumes only the current :class:`Bar` plus that latent
       state and returns a :class:`FilterState`. Map the model's one-step
-      surprise onto ``surprise`` and its high-vol probability onto
-      ``regime_prob``.
+      surprise through :meth:`RegimeFilter.standardize_surprise` and its
+      high-vol probability onto ``regime_prob``. After the training
+      replay, call :meth:`RegimeFilter.calibrate_surprise` with the raw
+      surprise and ``pred_vol`` so LeWM shares the overlay scale.
 
     Until that checkpoint path exists, ``update`` raises
     ``NotImplementedError``. ``checkpoint_path`` is reserved for the
@@ -29,6 +31,7 @@ class LeWMFilter(RegimeFilter):
     """
 
     def __init__(self, checkpoint_path: str | None = None) -> None:
+        super().__init__()
         self.checkpoint_path = checkpoint_path
         self._fitted = False
 

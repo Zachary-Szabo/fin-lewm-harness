@@ -26,13 +26,16 @@ class KalmanFilter(RegimeFilter):
         Var(dy) = q + 2 r,    Cov(dy_t, dy_{t-1}) = -r
 
     ``update`` is the standard predict/correct step. It never revises
-    past states. ``surprise`` is the absolute standardized innovation
-    ``|y_t - x_{t|t-1}| / sqrt(S_t)``. ``pred_vol`` is the innovation
-    standard deviation ``sqrt(S_t)``. ``regime_prob`` is 0 because this
-    model has no regime latent. ``filtered_price`` is ``exp(x_{t|t})``.
+    past states. The raw surprise is the absolute innovation
+    ``|y_t - x_{t|t-1}| / sqrt(S_t)``; ``fit`` turns that into a z-score
+    against a causal replay of the training prices only. ``pred_vol`` is
+    the innovation standard deviation ``sqrt(S_t)``. ``regime_prob`` is 0
+    because this model has no regime latent. ``filtered_price`` is
+    ``exp(x_{t|t})``.
     """
 
     def __init__(self, process_var: float = 1e-6, obs_var: float = 1e-4) -> None:
+        super().__init__()
         if process_var <= 0.0 or obs_var <= 0.0:
             raise ValueError("process_var and obs_var must be positive")
         self._q = float(process_var)
@@ -42,18 +45,19 @@ class KalmanFilter(RegimeFilter):
 
     def fit(self, train_df: pd.DataFrame) -> None:
         close = train_df["close"].to_numpy(dtype=np.float64)
-        if close.size < 5 or np.any(close <= 0.0):
+        if close.size >= 5 and np.all(close > 0.0):
+            increments = np.diff(np.log(close))
+            if increments.size >= 5:
+                centered = increments - increments.mean()
+                variance = float(np.dot(centered, centered) / centered.size)
+                lag = float(np.dot(centered[1:], centered[:-1]) / centered.size)
+                obs_var = max(-lag, 1e-12)
+                process_var = max(variance - 2.0 * obs_var, 1e-12)
+                self._q = process_var
+                self._r = obs_var
+        if close.size == 0 or np.any(close <= 0.0):
             return
-        increments = np.diff(np.log(close))
-        if increments.size < 5:
-            return
-        centered = increments - increments.mean()
-        variance = float(np.dot(centered, centered) / centered.size)
-        lag = float(np.dot(centered[1:], centered[:-1]) / centered.size)
-        obs_var = max(-lag, 1e-12)
-        process_var = max(variance - 2.0 * obs_var, 1e-12)
-        self._q = process_var
-        self._r = obs_var
+        self._calibrate_online(train_df)
 
     def reset(self) -> None:
         self._x = None
@@ -69,7 +73,7 @@ class KalmanFilter(RegimeFilter):
             return FilterState(
                 filtered_price=float(obs.close),
                 regime_prob=0.0,
-                surprise=0.0,
+                surprise=self.standardize_surprise(0.0),
                 pred_vol=math.sqrt(self._r),
             )
         p_pred = self._p + self._q
@@ -78,10 +82,10 @@ class KalmanFilter(RegimeFilter):
         gain = p_pred / innovation_var
         self._x = self._x + gain * innovation
         self._p = (1.0 - gain) * p_pred
-        surprise = abs(innovation) / math.sqrt(innovation_var)
+        raw_surprise = abs(innovation) / math.sqrt(innovation_var)
         return FilterState(
             filtered_price=math.exp(self._x),
             regime_prob=0.0,
-            surprise=surprise,
+            surprise=self.standardize_surprise(raw_surprise),
             pred_vol=math.sqrt(innovation_var),
         )

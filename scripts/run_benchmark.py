@@ -31,12 +31,17 @@ from lewm_harness.strategies.mean_reversion import MeanReversionStrategy
 from lewm_harness.strategies.momentum import MomentumStrategy
 from lewm_harness.strategies.stat_arb import StatArbStrategy
 
-# Shared overlay so filter differences are not confounded with rule changes.
-# Identity has surprise 0 and regime_prob 0, so this leaves it unscaled.
-_OVERLAY = {
+# Surprise is a training z-score, so one threshold applies to every filter.
+# Vol targeting is left unset and filled from each filter's median train pred_vol.
+# Mean reversion and pairs pause in a high-vol regime; momentum does not.
+_SURPRISE = {
     "surprise_scale": 1.0,
     "surprise_threshold": 1.0,
-    "regime_cutoff": 0.85,
+}
+_REGIME_CUTOFF = {
+    "mean_reversion": 0.85,
+    "momentum": None,
+    "stat_arb": 0.85,
 }
 
 _FILTERS = {
@@ -56,7 +61,7 @@ def _strategy_factory(name: str):
     cls = _STRATEGIES[name]
 
     def factory():
-        return cls(**_OVERLAY)
+        return cls(**_SURPRISE, regime_cutoff=_REGIME_CUTOFF[name])
 
     return factory
 
@@ -121,6 +126,7 @@ def run(args: argparse.Namespace) -> str:
                 seed=args.seed,
                 train_frac=0.5,
                 fee_bps=args.fee_bps,
+                periods_per_year=args.periods_per_year,
                 generator=generator,
             )
             walk = run_walk_forward(
@@ -130,8 +136,15 @@ def run(args: argparse.Namespace) -> str:
                 train_size=args.wf_train,
                 test_size=args.wf_test,
                 fee_bps=args.fee_bps,
+                periods_per_year=args.periods_per_year,
             )
-            metrics = compute_metrics(walk.pnl, walk.positions)
+            metrics = walk.metrics
+            if metrics is None:
+                metrics = compute_metrics(
+                    walk.pnl,
+                    walk.positions,
+                    periods_per_year=args.periods_per_year,
+                )
             rows.append(
                 {
                     "strategy": strategy_name,
@@ -149,9 +162,12 @@ def run(args: argparse.Namespace) -> str:
         f"lewm-market-filter phase 1  paths={args.paths} steps={args.steps} "
         f"train_frac=0.5 fee_bps={args.fee_bps} seed={args.seed}\n"
         f"walk-forward steps={args.wf_steps} train={args.wf_train} "
-        f"test={args.wf_test} overlay={_OVERLAY}\n"
+        f"test={args.wf_test} periods_per_year={args.periods_per_year:g}\n"
         "Monte Carlo and walk-forward scores are out of sample. "
-        "Sharpe uses sqrt(252).\n"
+        f"Sharpe uses sqrt({args.periods_per_year:g}). "
+        "Surprise is the train-set z-score; vol target is each filter's "
+        "median training pred_vol. Regime pause at 0.85 for "
+        "mean_reversion and stat_arb; momentum pause is off.\n"
         "mean_reversion and momentum use single-asset regime paths; "
         "stat_arb uses cointegrated pair paths."
     )
@@ -164,6 +180,12 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--steps", type=int, default=2000, help="steps per Monte Carlo path")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--fee-bps", type=float, default=1.0)
+    parser.add_argument(
+        "--periods-per-year",
+        type=float,
+        default=252.0,
+        help="Sharpe annualization. Use 252 for daily bars, or 252*390 for 1-minute equity bars.",
+    )
     parser.add_argument("--wf-steps", type=int, default=4000)
     parser.add_argument("--wf-train", type=int, default=1000)
     parser.add_argument("--wf-test", type=int, default=500)

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from lewm_harness.engine.metrics import PerformanceMetrics
 from lewm_harness.filters.base import RegimeFilter
 from lewm_harness.strategies.base import Strategy
 from lewm_harness.types import Bar, FilterState
@@ -29,6 +30,7 @@ class BacktestResult:
     pnl: np.ndarray
     positions: np.ndarray
     states: list[FilterState]
+    metrics: PerformanceMetrics | None = None
 
 
 def run_backtest(
@@ -72,6 +74,7 @@ def run_backtest(
 
     filt.reset()
     strategy.reset()
+    strategy.bind_runtime_vol_target(getattr(filt, "reference_vol_", None))
     n_decisions = n_rows - 1
     positions = np.zeros(n_decisions, dtype=np.float64)
     pnl = np.zeros(n_decisions, dtype=np.float64)

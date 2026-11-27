@@ -14,6 +14,7 @@ import numpy as np
 import pandas as pd
 
 from lewm_harness.engine.backtester import BacktestResult, run_backtest
+from lewm_harness.engine.metrics import compute_metrics
 from lewm_harness.filters.base import RegimeFilter
 from lewm_harness.strategies.base import Strategy
 from lewm_harness.types import FilterState
@@ -26,13 +27,16 @@ def run_walk_forward(
     train_size: int,
     test_size: int,
     fee_bps: float = 1.0,
+    periods_per_year: float = 252.0,
 ) -> BacktestResult:
     """Concatenate out-of-sample backtests over rolling train/test folds.
 
     A fold starting at ``s`` trains on ``[s, s + train_size)`` and tests
     on ``[s + train_size, s + train_size + test_size)``. The next fold
     starts at ``s + test_size``. The returned PnL, positions, and states
-    are the test decisions only.
+    are the test decisions only. ``periods_per_year`` annualizes the
+    Sharpe stored on ``result.metrics`` (252 for daily bars; a 1-minute
+    equity session is ``252 * 390``).
     """
 
     if train_size < 2 or test_size < 2:
@@ -57,8 +61,14 @@ def run_walk_forward(
         states.extend(fold.states)
         start += test_size
 
-    return BacktestResult(
+    result = BacktestResult(
         pnl=np.concatenate(pnl_parts),
         positions=np.concatenate(position_parts),
         states=states,
     )
+    result.metrics = compute_metrics(
+        result.pnl,
+        result.positions,
+        periods_per_year=periods_per_year,
+    )
+    return result

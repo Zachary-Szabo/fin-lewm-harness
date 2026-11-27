@@ -18,7 +18,8 @@ class StatArbStrategy(Strategy):
     when ``ret`` is the equal-weight pair return.
 
     The z-score window includes the current spread. The signal is 0 until
-    the window is full.
+    the window is full. Like price mean reversion, the high-vol pause
+    defaults on.
     """
 
     def __init__(
@@ -28,7 +29,9 @@ class StatArbStrategy(Strategy):
         *,
         surprise_scale: float = 1.0,
         surprise_threshold: float = 0.0,
-        regime_cutoff: float | None = None,
+        regime_cutoff: float | None = 0.85,
+        target_vol: float | None = None,
+        vol_eps: float = 1e-8,
     ) -> None:
         if window < 2:
             raise ValueError("window must be at least 2")
@@ -38,6 +41,8 @@ class StatArbStrategy(Strategy):
             surprise_scale=surprise_scale,
             surprise_threshold=surprise_threshold,
             regime_cutoff=regime_cutoff,
+            target_vol=target_vol,
+            vol_eps=vol_eps,
         )
         self.window = window
         self.z_scale = float(z_scale)

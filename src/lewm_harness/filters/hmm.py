@@ -8,8 +8,9 @@ matrix. The component with the larger variance is the high-vol state.
 ``update`` runs one step of the forward algorithm. There is no backward
 pass and no Viterbi decode, so ``regime_prob`` is the filtered
 probability ``P(high-vol | obs_0..t)``, not a smoothed probability.
-``surprise`` is the negative log likelihood of ``obs.ret`` under the
-one-step predictive mixture. ``pred_vol`` is the square root of the
+The raw surprise is the negative log likelihood of ``obs.ret`` under the
+one-step predictive mixture. ``fit`` replaces it with the z-score of that
+score on a causal training replay. ``pred_vol`` is the square root of the
 filtered mixture variance. ``filtered_price`` stays at ``obs.close``
 because this model does not estimate a latent price.
 """
@@ -35,6 +36,7 @@ class HMMFilter(RegimeFilter):
     """Causal 2-state Gaussian HMM on simple returns."""
 
     def __init__(self, random_state: int = 0) -> None:
+        super().__init__()
         self.random_state = random_state
         self.means_: np.ndarray | None = None
         self.stds_: np.ndarray | None = None
@@ -87,7 +89,7 @@ class HMMFilter(RegimeFilter):
                 dtype=np.float64,
             )
         self.high_vol_state = 1
-        self.reset()
+        self._calibrate_online(train_df)
 
     def reset(self) -> None:
         """Drop the forward messages. Emission and transition parameters remain."""
@@ -118,6 +120,6 @@ class HMMFilter(RegimeFilter):
         return FilterState(
             filtered_price=float(obs.close),
             regime_prob=regime_prob,
-            surprise=float(-log_norm),
+            surprise=self.standardize_surprise(float(-log_norm)),
             pred_vol=pred_vol,
         )

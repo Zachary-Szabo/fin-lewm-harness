@@ -11,6 +11,8 @@ from lewm_harness.engine.metrics import compute_metrics
 from lewm_harness.filters.identity import IdentityFilter
 from lewm_harness.filters.lewm_stub import LeWMFilter
 from lewm_harness.strategies.base import Strategy
+from lewm_harness.strategies.mean_reversion import MeanReversionStrategy
+from lewm_harness.strategies.momentum import MomentumStrategy
 from lewm_harness.types import Bar, FilterState
 
 
@@ -127,6 +129,26 @@ def test_true_regime_label_is_not_given_to_the_strategy() -> None:
     run_backtest(frame, IdentityFilter(), _Probe(), fee_bps=0.0)
     assert seen
     assert all(extras is None or "true_regime" not in extras for extras in seen)
+
+
+def test_overlay_sizes_on_vol_and_pauses_only_mean_reversion() -> None:
+    calm = FilterState(filtered_price=100.0, regime_prob=0.0, surprise=0.0, pred_vol=0.01)
+    stressed = FilterState(filtered_price=100.0, regime_prob=0.95, surprise=0.0, pred_vol=0.05)
+    fade = MeanReversionStrategy(surprise_scale=0.0, target_vol=0.01, regime_cutoff=0.85)
+    assert fade.apply_overlay(1.0, calm) == pytest.approx(1.0)
+    assert fade.apply_overlay(1.0, stressed) == pytest.approx(0.0)
+    trend = MomentumStrategy()
+    assert trend.regime_cutoff is None
+    trend.target_vol = 0.01
+    assert trend.apply_overlay(0.5, stressed) == pytest.approx(0.5 * 0.01 / 0.05)
+    surprised = FilterState(filtered_price=100.0, regime_prob=0.0, surprise=3.0, pred_vol=0.01)
+    scaled = MeanReversionStrategy(
+        surprise_scale=1.0,
+        surprise_threshold=1.0,
+        regime_cutoff=None,
+        target_vol=None,
+    )
+    assert scaled.apply_overlay(1.0, surprised) == pytest.approx(1.0 / 3.0)
 
 
 def test_lewm_stub_reserves_the_update_slot() -> None:

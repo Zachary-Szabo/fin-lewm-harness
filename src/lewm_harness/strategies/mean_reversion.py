@@ -15,6 +15,8 @@ class MeanReversionStrategy(Strategy):
     close, which is known at decision time. The position earns the *next*
     return inside the backtester. Until the window is full the signal is 0.
     A positive z-score (price above its mean) produces a negative position.
+    The high-vol pause defaults on: a turbulent regime is where this fade
+    is most often run over.
     """
 
     def __init__(
@@ -24,7 +26,9 @@ class MeanReversionStrategy(Strategy):
         *,
         surprise_scale: float = 1.0,
         surprise_threshold: float = 0.0,
-        regime_cutoff: float | None = None,
+        regime_cutoff: float | None = 0.85,
+        target_vol: float | None = None,
+        vol_eps: float = 1e-8,
     ) -> None:
         if window < 2:
             raise ValueError("window must be at least 2")
@@ -34,6 +38,8 @@ class MeanReversionStrategy(Strategy):
             surprise_scale=surprise_scale,
             surprise_threshold=surprise_threshold,
             regime_cutoff=regime_cutoff,
+            target_vol=target_vol,
+            vol_eps=vol_eps,
         )
         self.window = window
         self.z_scale = float(z_scale)
