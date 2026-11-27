@@ -9,7 +9,6 @@ import pytest
 from lewm_harness.engine.backtester import run_backtest
 from lewm_harness.engine.metrics import compute_metrics
 from lewm_harness.filters.identity import IdentityFilter
-from lewm_harness.filters.lewm_stub import LeWMFilter
 from lewm_harness.strategies.base import Strategy
 from lewm_harness.strategies.mean_reversion import MeanReversionStrategy
 from lewm_harness.strategies.momentum import MomentumStrategy
@@ -151,9 +150,9 @@ def test_overlay_sizes_on_vol_and_pauses_only_mean_reversion() -> None:
     assert scaled.apply_overlay(1.0, surprised) == pytest.approx(1.0 / 3.0)
 
 
-def test_lewm_stub_reserves_the_update_slot() -> None:
-    filt = LeWMFilter(checkpoint_path="phase2.pt")
-    filt.fit(pd.DataFrame({"ret": [0.0, 0.01, -0.01]}))
-    filt.reset()
-    with pytest.raises(NotImplementedError, match="Phase 1 stub"):
-        filt.update(Bar(ts=0, close=100.0, ret=0.0))
+def test_lewm_filter_requires_a_checkpoint_file() -> None:
+    pytest.importorskip("torch")
+    from lewm_harness.filters.lewm import LeWMFilter
+
+    with pytest.raises(FileNotFoundError):
+        LeWMFilter("phase2.pt")
