@@ -195,11 +195,8 @@ def save_checkpoint(
         "feature_std": feature_std.tolist(),
         "log_volume_mean": prepared["log_volume_mean"],
         "log_volume_std": prepared["log_volume_std"],
-        "vol_head": {"coef": report.vol_head.coef.tolist(), "intercept": report.vol_head.intercept},
-        "regime_head": {
-            "coef": report.regime_head.coef.tolist(),
-            "intercept": report.regime_head.intercept,
-        },
+        "vol_head": _head_payload(report.vol_head),
+        "regime_head": _head_payload(report.regime_head),
     }
     torch.save(blob, path)
 
@@ -234,7 +231,18 @@ def head_from_blob(payload: dict) -> LinearHead:
     return LinearHead(
         coef=np.asarray(payload["coef"], dtype=np.float64),
         intercept=float(payload["intercept"]),
+        mean=np.asarray(payload["mean"], dtype=np.float64),
+        scale=np.asarray(payload["scale"], dtype=np.float64),
     )
+
+
+def _head_payload(head: LinearHead) -> dict[str, list[float] | float]:
+    return {
+        "coef": head.coef.tolist(),
+        "intercept": head.intercept,
+        "mean": head.mean.tolist(),
+        "scale": head.scale.tolist(),
+    }
 
 
 def run_smoke_benchmark(checkpoint: str | Path, n_paths: int = 3, n_steps: int = 240, seed: int = 0) -> list[dict[str, float | str]]:

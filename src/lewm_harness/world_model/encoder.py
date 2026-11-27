@@ -43,6 +43,11 @@ class PatchTSTEncoder(SequenceEncoder):
             raise ValueError("patch_len and stride must be positive")
         if seq_len < patch_len:
             raise ValueError("seq_len must be at least patch_len")
+        if (seq_len - patch_len) % stride != 0:
+            raise ValueError(
+                "(seq_len - patch_len) must be divisible by stride so unfold "
+                "covers the last bar instead of dropping it"
+            )
         if d_model % n_heads != 0:
             raise ValueError("d_model must be divisible by n_heads")
         self.in_channels = in_channels
@@ -76,6 +81,13 @@ class PatchTSTEncoder(SequenceEncoder):
                 f"expected x shape (batch, {self.seq_len}, {self.in_channels}), got {tuple(x.shape)}"
             )
         patches = x.transpose(1, 2).unfold(dimension=2, size=self.patch_len, step=self.stride)
+        if patches.shape[2] != self.n_patches:
+            raise RuntimeError(
+                f"unfold produced {patches.shape[2]} patches, expected {self.n_patches}"
+            )
+        covered = (self.n_patches - 1) * self.stride + self.patch_len
+        if covered != self.seq_len:
+            raise RuntimeError("patches do not cover the full window, including the last bar")
         patches = patches.permute(0, 2, 3, 1).contiguous()
         flat = patches.reshape(x.shape[0], self.n_patches, self.patch_len * self.in_channels)
         tokens = self.input_proj(flat) + self.positional.unsqueeze(0)

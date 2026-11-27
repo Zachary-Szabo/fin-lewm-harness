@@ -55,6 +55,39 @@ def test_zip_round_trip_and_parquet_loader(tmp_path: Path) -> None:
     assert len(loaded) == 2
 
 
+def test_multi_month_concat_recomputes_boundary_return(tmp_path: Path) -> None:
+    close_m1_last = 110.0
+    close_m2_0 = 121.0
+    month_1 = pd.DataFrame(
+        {
+            "ts": [1, 2],
+            "open": [100.0, close_m1_last],
+            "high": [101.0, 111.0],
+            "low": [99.0, 109.0],
+            "close": [100.0, close_m1_last],
+            "volume": [1.0, 1.0],
+            "ret": [0.0, close_m1_last / 100.0 - 1.0],
+        }
+    )
+    month_2 = pd.DataFrame(
+        {
+            "ts": [3, 4],
+            "open": [close_m2_0, 130.0],
+            "high": [122.0, 131.0],
+            "low": [120.0, 129.0],
+            "close": [close_m2_0, 133.1],
+            "volume": [2.0, 2.0],
+            "ret": [0.0, 0.1],
+        }
+    )
+    folder = tmp_path / "5m"
+    folder.mkdir()
+    month_1.to_parquet(folder / "m1.parquet", index=False)
+    month_2.to_parquet(folder / "m2.parquet", index=False)
+    loaded = load_ohlcv_parquet(folder, interval="5m")
+    assert loaded["ret"].iloc[2] == close_m2_0 / close_m1_last - 1.0
+
+
 def test_ret_matches_close_ratio() -> None:
     raw = pd.DataFrame(
         {

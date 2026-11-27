@@ -214,12 +214,25 @@ def _read_parquet(path: Path) -> pd.DataFrame:
 
 
 def _finalize_loaded(frame: pd.DataFrame) -> pd.DataFrame:
-    required = {"ts", "close", "ret"}
+    """Sort, de-duplicate, drop bad prices, then rebuild ``ret`` from ``close``.
+
+    Each monthly parquet stores ``ret`` of its own first bar as 0. After
+    concatenation that bar is no longer the start of the series, so the
+    return is computed again from the previous close.
+    """
+
+    required = {"ts", "close"}
     missing = required - set(frame.columns)
     if missing:
         raise ValueError(f"parquet is missing columns: {sorted(missing)}")
     cleaned = frame.sort_values("ts").drop_duplicates("ts", keep="last")
-    cleaned = cleaned.replace([np.inf, -np.inf], np.nan).dropna(subset=["ts", "close", "ret"])
+    price_columns = [
+        name for name in ("ts", "open", "high", "low", "close", "volume") if name in cleaned.columns
+    ]
+    cleaned = cleaned.replace([np.inf, -np.inf], np.nan).dropna(subset=price_columns)
+    returns = cleaned["close"].pct_change().replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    cleaned = cleaned.copy()
+    cleaned["ret"] = returns.to_numpy(dtype=np.float64)
     return cleaned.reset_index(drop=True)
 
 

@@ -21,6 +21,45 @@ from lewm_harness.world_model.model import FinancialLeWM
 from lewm_harness.world_model.train import TrainConfig, resolve_device, run_training, synthetic_frame
 
 
+def test_saved_probe_head_matches_the_training_pipeline() -> None:
+    from lewm_harness.world_model.probes import _fit_auc, _head_from_pipeline, _ridge_pipeline
+
+    rng = np.random.default_rng(0)
+    features = rng.normal(loc=2.0, scale=3.0, size=(48, 5))
+    target = features[:, 0] * 0.4 + rng.normal(scale=0.2, size=48)
+    pipeline = _ridge_pipeline()
+    pipeline.fit(features, target)
+    head = _head_from_pipeline(pipeline)
+    manual = np.array([head.predict(row) for row in features])
+    np.testing.assert_allclose(manual, pipeline.predict(features), atol=1e-10, rtol=0.0)
+    labels = (target > np.median(target)).astype(np.int64)
+    _auc, regime_head = _fit_auc(features, labels, features, labels)
+    logits = np.array([regime_head.predict(row) for row in features])
+    probabilities = 1.0 / (1.0 + np.exp(-np.clip(logits, -40.0, 40.0)))
+    from sklearn.pipeline import Pipeline
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.linear_model import LogisticRegression
+
+    logistic = Pipeline(
+        [("scale", StandardScaler()), ("model", LogisticRegression(max_iter=400))]
+    )
+    logistic.fit(features, labels)
+    np.testing.assert_allclose(probabilities, logistic.predict_proba(features)[:, 1], atol=1e-10, rtol=0.0)
+
+
+def test_patchtst_rejects_a_stride_that_drops_the_tail() -> None:
+    with pytest.raises(ValueError, match="divisible by stride"):
+        PatchTSTEncoder(
+            in_channels=5,
+            seq_len=18,
+            patch_len=4,
+            stride=4,
+            d_model=32,
+            n_heads=4,
+            n_layers=1,
+        )
+
+
 def test_encoder_and_jepa_loss_backward_on_cpu() -> None:
     torch.manual_seed(0)
     encoder = PatchTSTEncoder(
@@ -64,6 +103,12 @@ def test_features_do_not_depend_on_the_future() -> None:
     perturbed.loc[t_cut:, "volume"] = 1.0
     perturbed_prepared = prepare_feature_matrix(perturbed, t_cut, vol_window=8)
     np.testing.assert_allclose(prepared["raw"][:t_cut], perturbed_prepared["raw"][:t_cut], atol=0.0, rtol=0.0)
+    np.testing.assert_allclose(
+        prepared["scaled"][:t_cut], perturbed_prepared["scaled"][:t_cut], atol=0.0, rtol=0.0
+    )
+    np.testing.assert_allclose(prepared["feature_mean"], perturbed_prepared["feature_mean"], atol=0.0, rtol=0.0)
+    np.testing.assert_allclose(prepared["feature_std"], perturbed_prepared["feature_std"], atol=0.0, rtol=0.0)
+    assert prepared["log_volume_mean"] == perturbed_prepared["log_volume_mean"]
     assert not np.allclose(prepared["raw"][t_cut:], perturbed_prepared["raw"][t_cut:])
     direct = causal_feature_frame(frame, 8, prepared["log_volume_mean"], prepared["log_volume_std"])
     np.testing.assert_allclose(direct, prepared["raw"], atol=0.0, rtol=0.0)

@@ -1,8 +1,10 @@
 """Gate 1 linear probes on a frozen world-model latent.
 
 Both heads are fit on the training time split only and scored on a later
-split. The baseline is the same linear model on the raw feature row at the
-end of the window, not on ``z``.
+split. Each head is a ``StandardScaler`` plus a linear model. The scaler is
+fit on that same training split and stored with the coefficients so
+``LeWMFilter`` applies the identical map. The baseline is the same pipeline
+on the raw feature row at the end of the window, not on ``z``.
 """
 
 from __future__ import annotations
@@ -11,21 +13,34 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from sklearn.linear_model import LogisticRegression, Ridge
+from sklearn.linear_model import LogisticRegression, RidgeCV
 from sklearn.metrics import r2_score, roc_auc_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 from lewm_harness.world_model.model import FinancialLeWM
+
+_RIDGE_ALPHAS = (0.1, 1.0, 10.0, 100.0)
 
 
 @dataclass(frozen=True)
 class LinearHead:
-    """Frozen linear map ``coef @ z + intercept`` saved inside the checkpoint."""
+    """Scaled linear map saved inside the checkpoint.
+
+    ``predict`` applies the training ``StandardScaler`` and then
+    ``coef @ z_scaled + intercept``. That is the same number the probe
+    pipeline produces.
+    """
 
     coef: np.ndarray
     intercept: float
+    mean: np.ndarray
+    scale: np.ndarray
 
     def predict(self, z: np.ndarray) -> float:
-        return float(self.coef @ z + self.intercept)
+        values = np.asarray(z, dtype=np.float64).reshape(-1)
+        scaled = (values - self.mean) / self.scale
+        return float(self.coef @ scaled + self.intercept)
 
 
 @dataclass(frozen=True)
@@ -67,20 +82,18 @@ def evaluate_gate1(
     regime_train = (y_train > threshold).astype(np.int64)
     regime_test = (y_test > threshold).astype(np.int64)
 
-    vol_model = Ridge(alpha=1.0)
+    vol_model = _ridge_pipeline()
     vol_model.fit(z_train, y_train)
-    baseline_vol = Ridge(alpha=1.0)
+    baseline_vol = _ridge_pipeline()
     baseline_vol.fit(base_train, y_train)
     vol_r2 = _r2(y_test, vol_model.predict(z_test))
     baseline_vol_r2 = _r2(y_test, baseline_vol.predict(base_test))
 
-    regime_auc, regime_coef, regime_intercept = _fit_auc(z_train, regime_train, z_test, regime_test)
-    baseline_regime_auc, _, _ = _fit_auc(base_train, regime_train, base_test, regime_test)
-    vol_head = LinearHead(
-        coef=np.asarray(vol_model.coef_, dtype=np.float64).reshape(-1),
-        intercept=float(vol_model.intercept_),
+    regime_auc, regime_head = _fit_auc(z_train, regime_train, z_test, regime_test)
+    baseline_regime_auc, _baseline_regime_head = _fit_auc(
+        base_train, regime_train, base_test, regime_test
     )
-    regime_head = LinearHead(coef=regime_coef, intercept=regime_intercept)
+    vol_head = _head_from_pipeline(vol_model)
     return Gate1Report(
         vol_r2=vol_r2,
         baseline_vol_r2=baseline_vol_r2,
@@ -125,20 +138,50 @@ def _r2(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     return float(r2_score(y_true, y_pred))
 
 
+def _ridge_pipeline() -> Pipeline:
+    return Pipeline(
+        [
+            ("scale", StandardScaler()),
+            ("model", RidgeCV(alphas=list(_RIDGE_ALPHAS))),
+        ]
+    )
+
+
+def _logistic_pipeline() -> Pipeline:
+    return Pipeline(
+        [
+            ("scale", StandardScaler()),
+            ("model", LogisticRegression(max_iter=400)),
+        ]
+    )
+
+
+def _head_from_pipeline(pipeline: Pipeline) -> LinearHead:
+    scaler: StandardScaler = pipeline.named_steps["scale"]
+    model = pipeline.named_steps["model"]
+    return LinearHead(
+        coef=np.asarray(model.coef_, dtype=np.float64).reshape(-1),
+        intercept=float(np.asarray(model.intercept_, dtype=np.float64).reshape(-1)[0]),
+        mean=np.asarray(scaler.mean_, dtype=np.float64).reshape(-1),
+        scale=np.asarray(scaler.scale_, dtype=np.float64).reshape(-1),
+    )
+
+
 def _fit_auc(
     x_train: np.ndarray,
     y_train: np.ndarray,
     x_test: np.ndarray,
     y_test: np.ndarray,
-) -> tuple[float, np.ndarray, float]:
+) -> tuple[float, LinearHead]:
     width = x_train.shape[1]
     if len(np.unique(y_train)) < 2:
-        return float("nan"), np.zeros(width, dtype=np.float64), 0.0
-    model = LogisticRegression(max_iter=400)
-    model.fit(x_train, y_train)
-    coef = np.asarray(model.coef_, dtype=np.float64).reshape(-1)
-    intercept = float(np.asarray(model.intercept_, dtype=np.float64).reshape(-1)[0])
+        zeros = np.zeros(width, dtype=np.float64)
+        ones = np.ones(width, dtype=np.float64)
+        return float("nan"), LinearHead(coef=zeros, intercept=0.0, mean=zeros, scale=ones)
+    pipeline = _logistic_pipeline()
+    pipeline.fit(x_train, y_train)
+    head = _head_from_pipeline(pipeline)
     if len(np.unique(y_test)) < 2:
-        return float("nan"), coef, intercept
-    scores = model.predict_proba(x_test)[:, 1]
-    return float(roc_auc_score(y_test, scores)), coef, intercept
+        return float("nan"), head
+    scores = pipeline.predict_proba(x_test)[:, 1]
+    return float(roc_auc_score(y_test, scores)), head
