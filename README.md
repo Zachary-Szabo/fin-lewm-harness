@@ -88,7 +88,7 @@ mean_reversion       hmm    -0.0920         0.6951       -1.3560       0.7209   
 
 ## Phase 3: Real-data walk-forward
 
-Each window trains only on its past months. A validation tail is carved from the end of that train block, with an embargo of `2 * seq_len` bars so train labels and JEPA targets do not touch validation. The test months are held out of the scaler, the optimizer, the probe fit, and the epoch choice. Surprise z-scores are a causal replay of the train months. If the file has no `spread` column, the runner adds a trailing close deviation that uses only past bars, so the pairs strategy can run on a single symbol.
+Each window trains only on its past months. A validation tail (`val_frac` 0.1 by default) is carved from the end of that train block, with an embargo of `2 * seq_len` bars so train labels and JEPA targets do not touch validation. The test months are held out of the scaler, the optimizer, the probe fit, and the epoch choice. LeWM surprise z-scores and `reference_vol_` are fit on that validation tail, not on the bars the encoder trained on. If the file has no `spread` column, the runner adds a trailing close deviation that uses only past bars, so the pairs strategy can run on a single symbol. `--data` must not contain more than one symbol folder.
 
 On a Kaggle T4, write outputs under `/kaggle/working` and turn on mixed precision (`--amp` uses fp16 on a T4 and bf16 on Ampere or newer):
 
@@ -98,7 +98,7 @@ python scripts/train_lewm.py --data /kaggle/working/data/BTCUSDT/5m --device cud
 python scripts/run_walk_forward.py --data /kaggle/working/data/BTCUSDT/5m --device cuda --amp --epochs 20 --seeds 0 1 2 --train-months 6 --test-months 1 --step-months 1 --pred-hop 1 --out /kaggle/working/walk_forward
 ```
 
-`--reuse-checkpoints` skips a window/seed whose `best.pt` is already in the output directory, so a preempted session can resume. The summary is mean and std Sharpe across windows and seeds, the 5th percentile Sharpe, the worst max drawdown, and mean turnover. It also prints LeWM minus the best non-LeWM Sharpe for each strategy, with a bootstrap 95% interval over windows.
+`--reuse-checkpoints` skips a finished `(window, seed)` only when `config.json` hashes to the same `TrainConfig`, window start/end timestamps, train-data fingerprint, and seed. Checkpoints and CSV files are replaced atomically. The summary is mean and std Sharpe across windows and seeds, the 5th percentile Sharpe, the worst max drawdown, and mean turnover. It prints LeWM minus each baseline, with N, the per-window deltas, and a sign count. A bootstrap 95% interval is included only when N is at least 8. `summary.txt` also records `periods_per_year` and the median bar spacing. `--interval` must agree with that spacing within 1%.
 
 Results below are a placeholder until that Kaggle run is filled in.
 

@@ -46,6 +46,35 @@ _INTERVAL_MINUTES = {
 }
 
 
+def interval_milliseconds(interval: str) -> float:
+    """Nominal bar length for a Binance interval, in milliseconds."""
+
+    if interval not in _INTERVAL_MINUTES:
+        known = ", ".join(sorted(_INTERVAL_MINUTES))
+        raise ValueError(f"unsupported interval {interval!r}; expected one of {known}")
+    return float(_INTERVAL_MINUTES[interval]) * 60_000.0
+
+
+def assert_single_symbol(path: str | Path) -> None:
+    """Reject a data root that holds more than one symbol directory.
+
+    ``data/BTCUSDT/5m`` is one symbol. ``data/`` with both ``BTCUSDT`` and
+    ``ETHUSDT`` is not, because concatenating them would invent returns at
+    the symbol boundary.
+    """
+
+    root = Path(path)
+    if not root.is_dir() or root.name in _INTERVAL_MINUTES:
+        return
+    children = [child for child in root.iterdir() if child.is_dir()]
+    if children and all(child.name in _INTERVAL_MINUTES for child in children):
+        return
+    symbols = [child.name for child in children if child.name not in _INTERVAL_MINUTES]
+    if len(symbols) > 1:
+        names = ", ".join(sorted(symbols))
+        raise ValueError(f"--data contains more than one symbol folder: {names}")
+
+
 def periods_per_year(interval: str) -> float:
     """Bar count in a 365-day year for a Binance kline interval.
 

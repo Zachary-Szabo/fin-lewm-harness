@@ -15,7 +15,7 @@ _SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from lewm_harness.data.binance import load_ohlcv_parquet
+from lewm_harness.data.binance import assert_single_symbol, load_ohlcv_parquet
 from lewm_harness.engine.monthly_walk import run_monthly_walk_forward
 from lewm_harness.world_model.train import TrainConfig, resolve_device
 
@@ -40,6 +40,7 @@ def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
     if (args.seq_len - 4) % 4 != 0:
         parser.error("--seq-len must satisfy (seq_len - 4) % 4 == 0 for the default patch size")
+    assert_single_symbol(args.data)
     frame = load_ohlcv_parquet(args.data, interval=args.interval)
     config = TrainConfig(
         epochs=args.epochs,

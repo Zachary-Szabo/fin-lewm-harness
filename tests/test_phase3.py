@@ -14,7 +14,9 @@ pytest.importorskip("torch")
 
 import torch
 
+from lewm_harness.data.binance import assert_single_symbol
 from lewm_harness.data.markov import generate_regime_series
+from lewm_harness.engine.monthly_walk import month_labels, resolve_bar_clock, run_monthly_walk_forward
 from lewm_harness.filters.lewm import LeWMFilter
 from lewm_harness.world_model.train import (
     TrainConfig,
@@ -95,7 +97,7 @@ def test_synthetic_walk_forward_script_finishes(tmp_path: Path) -> None:
     for month in range(4):
         start = pd.Timestamp("2024-01-01", tz="UTC") + pd.DateOffset(months=month)
         for step in range(40):
-            stamps.append(int((start + pd.Timedelta(hours=12 * step)).timestamp() * 1000))
+            stamps.append(int((start + pd.Timedelta(minutes=5 * step)).timestamp() * 1000))
     frame["ts"] = stamps
     frame["open"] = frame["close"]
     frame["high"] = frame["close"] * 1.001
@@ -143,7 +145,84 @@ def test_synthetic_walk_forward_script_finishes(tmp_path: Path) -> None:
     summary = (out / "summary.txt").read_text()
     assert "lewm" in summary
     assert "identity" in summary
-    assert "lewm_minus_best_baseline" in summary
+    assert "lewm_minus_baseline" in summary
+    assert "bootstrap CI skipped" in summary
+    assert "periods_per_year=" in summary
+    assert "bar_spacing_ms=" in summary
     windows = pd.read_csv(out / "windows.csv")
     assert set(windows["filter"]) == {"identity", "kalman", "hmm", "lewm"}
     assert set(windows["strategy"]) == {"mean_reversion", "momentum", "stat_arb"}
+    assert "flat_fraction" in windows.columns
+
+
+def _monthly_frame(seed: int) -> pd.DataFrame:
+    frame = generate_regime_series(160, seed=seed)
+    stamps: list[int] = []
+    for month in range(4):
+        start = pd.Timestamp("2024-01-01", tz="UTC") + pd.DateOffset(months=month)
+        for step in range(40):
+            stamps.append(int((start + pd.Timedelta(minutes=5 * step)).timestamp() * 1000))
+    frame["ts"] = stamps
+    frame["volume"] = np.linspace(5.0, 9.0, len(frame))
+    return frame
+
+
+def test_monthly_walk_forward_ignores_perturbed_test_months(tmp_path: Path) -> None:
+    frame = _monthly_frame(7)
+    config = _tiny_config(epochs=1, n_steps=160, patience=2)
+    device = resolve_device("cpu")
+    kwargs = dict(
+        config=config,
+        seeds=[0],
+        train_months=2,
+        test_months=1,
+        step_months=1,
+        device=device,
+        use_amp=False,
+        interval="5m",
+    )
+    run_monthly_walk_forward(frame, tmp_path / "a", **kwargs)
+    labels = month_labels(frame)
+    months = list(dict.fromkeys(labels.tolist()))
+    perturbed = frame.copy(deep=True)
+    mask = labels.isin([months[2]]).to_numpy()
+    perturbed.loc[mask, "close"] = perturbed.loc[mask, "close"].to_numpy() * 3.0 + 11.0
+    perturbed.loc[mask, "ret"] = np.linspace(-0.4, 0.5, int(mask.sum()))
+    perturbed.loc[mask, "volume"] = 0.02
+    run_monthly_walk_forward(perturbed, tmp_path / "b", **kwargs)
+
+    left = torch.load(tmp_path / "a" / "checkpoints" / "w0_s0" / "best.pt", map_location="cpu", weights_only=False)
+    right = torch.load(tmp_path / "b" / "checkpoints" / "w0_s0" / "best.pt", map_location="cpu", weights_only=False)
+    for key in left["model"]:
+        assert torch.equal(left["model"][key], right["model"][key])
+    np.testing.assert_array_equal(np.asarray(left["feature_mean"]), np.asarray(right["feature_mean"]))
+    np.testing.assert_array_equal(np.asarray(left["feature_std"]), np.asarray(right["feature_std"]))
+
+    train_mask = labels.isin(months[:2]).to_numpy()
+    train = frame.loc[train_mask].reset_index(drop=True)
+    filt_left = LeWMFilter(tmp_path / "a" / "checkpoints" / "w0_s0" / "best.pt")
+    filt_right = LeWMFilter(tmp_path / "b" / "checkpoints" / "w0_s0" / "best.pt")
+    filt_left.fit(train)
+    filt_right.fit(train)
+    assert filt_left._surprise_mean == filt_right._surprise_mean
+    assert filt_left._surprise_std == filt_right._surprise_std
+    assert filt_left.reference_vol_ == filt_right.reference_vol_
+
+    scored_a = pd.read_csv(tmp_path / "a" / "windows.csv")
+    scored_b = pd.read_csv(tmp_path / "b" / "windows.csv")
+    window_a = scored_a.loc[scored_a["window"] == 0, "total_return"].to_numpy()
+    window_b = scored_b.loc[scored_b["window"] == 0, "total_return"].to_numpy()
+    assert window_a.shape == window_b.shape
+    assert not np.allclose(window_a, window_b)
+
+
+def test_interval_mismatch_and_multi_symbol_root_raise(tmp_path: Path) -> None:
+    frame = _monthly_frame(1)
+    frame["ts"] = frame["ts"].iloc[0] + np.arange(len(frame)) * 12 * 60 * 60 * 1000
+    with pytest.raises(ValueError, match="median bar spacing"):
+        resolve_bar_clock(frame, "5m")
+    (tmp_path / "BTCUSDT").mkdir()
+    (tmp_path / "ETHUSDT").mkdir()
+    with pytest.raises(ValueError, match="more than one symbol"):
+        assert_single_symbol(tmp_path)
+    assert_single_symbol(tmp_path / "BTCUSDT")

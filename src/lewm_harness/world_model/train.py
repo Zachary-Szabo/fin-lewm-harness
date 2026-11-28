@@ -7,6 +7,7 @@ the causal filter can load.
 
 from __future__ import annotations
 
+import os
 from contextlib import nullcontext
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,7 +38,7 @@ class TrainConfig:
     lambda_reg: float = 0.1
     ema_decay: float = 0.99
     train_frac: float = 0.7
-    val_frac: float = 0.2
+    val_frac: float = 0.1
     seed: int = 0
     n_steps: int = 512
     amp: bool = False
@@ -130,7 +131,7 @@ def make_time_split(
     seq_len: int,
     pred_hop: int,
     train_frac: float = 0.7,
-    val_frac: float = 0.2,
+    val_frac: float = 0.1,
 ) -> TimeSplit:
     """Place validation at the end of the pre-test block, behind an embargo.
 
@@ -392,6 +393,7 @@ def save_checkpoint(
             "ema_decay": config.ema_decay,
             "lambda_reg": config.lambda_reg,
             "pred_hop": config.pred_hop,
+            "val_frac": config.val_frac,
         },
         "feature_mean": feature_mean.tolist(),
         "feature_std": feature_std.tolist(),
@@ -400,7 +402,10 @@ def save_checkpoint(
         "vol_head": _head_payload(report.vol_head),
         "regime_head": _head_payload(report.regime_head),
     }
-    torch.save(blob, path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    torch.save(blob, temporary)
+    os.replace(temporary, path)
 
 
 def load_checkpoint(path: str | Path, device: torch.device | None = None) -> tuple[FinancialLeWM, dict]:
@@ -423,6 +428,7 @@ def load_checkpoint(path: str | Path, device: torch.device | None = None) -> tup
         ema_decay=float(blob["config"]["ema_decay"]),
         lambda_reg=float(blob["config"]["lambda_reg"]),
         pred_hop=int(blob["config"].get("pred_hop", 1)),
+        val_frac=float(blob["config"].get("val_frac", 0.1)),
     )
     model = build_model(config).to(target)
     model.load_state_dict(blob["model"])
