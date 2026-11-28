@@ -33,13 +33,22 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--epochs", type=int, default=2)
     parser.add_argument("--n-steps", type=int, default=512)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--pred-hop", type=int, default=1)
+    parser.add_argument("--patience", type=int, default=5)
     parser.add_argument("--out", default="checkpoint.pt")
     parser.add_argument("--smoke-benchmark", action="store_true")
     args = parser.parse_args(argv)
     if not args.synthetic_smoke and not args.data:
         parser.error("pass --synthetic-smoke or --data")
     device = resolve_device(args.device)
-    config = TrainConfig(epochs=args.epochs, n_steps=args.n_steps, seed=args.seed, amp=args.amp)
+    config = TrainConfig(
+        epochs=args.epochs,
+        n_steps=args.n_steps,
+        seed=args.seed,
+        amp=args.amp,
+        pred_hop=args.pred_hop,
+        patience=args.patience,
+    )
     if args.synthetic_smoke:
         frame = synthetic_frame(config.n_steps, config.seed)
     else:
@@ -53,9 +62,10 @@ def main(argv: list[str] | None = None) -> None:
         f"regime_auc={report.regime_auc:.4f} "
         f"baseline_regime_auc={report.baseline_regime_auc:.4f} "
         f"n_train={report.n_train} n_test={report.n_test} "
-        f"device={result.device}"
+        f"device={result.device} best_epoch={result.best_epoch}"
     )
     print(f"checkpoint={result.checkpoint_path}")
+    print(f"history={result.history_path}")
     if args.smoke_benchmark:
         rows = run_smoke_benchmark(result.checkpoint_path, seed=args.seed)
         print("filter  mc_sharpe  mc_sharpe_std  mc_sharpe_p5  mc_worst_dd")

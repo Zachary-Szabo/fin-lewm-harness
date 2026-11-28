@@ -1,8 +1,9 @@
 """JEPA world model: an online encoder, an EMA target encoder, and a latent predictor.
 
-The predictor maps ``z_t`` to the next-window latent. The training target is
-the stop-gradient (EMA) encoding of that next window. ``surprise`` is the
-latent error ``||pred(z_t) - z_{t+1}||_2``.
+The predictor maps ``z_t`` to the latent of a later window. ``--pred-hop``
+(default 1) is how many bars separate the two windows. Gate 1 does not use
+that hop: it scores the next full non-overlapping window. ``surprise`` is
+``||pred(z_t) - z_{t+hop}||_2``.
 """
 
 from __future__ import annotations

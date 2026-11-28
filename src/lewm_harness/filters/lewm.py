@@ -35,6 +35,7 @@ class LeWMFilter(RegimeFilter):
         self.model.eval()
         config = blob["config"]
         self.seq_len = int(config["seq_len"])
+        self.pred_hop = int(config.get("pred_hop", 1))
         self.vol_window = int(config["vol_window"])
         self.feature_mean = np.asarray(blob["feature_mean"], dtype=np.float64)
         self.feature_std = np.asarray(blob["feature_std"], dtype=np.float64)
@@ -44,7 +45,6 @@ class LeWMFilter(RegimeFilter):
         self.regime_head: LinearHead = head_from_blob(blob["regime_head"])
         self._features = OnlineFeatureState(self.vol_window, self.log_volume_mean, self.log_volume_std)
         self._rows: list[np.ndarray] = []
-        self._prev_online_z: torch.Tensor | None = None
 
     def fit(self, train_df: pd.DataFrame) -> None:
         """Z-score latent surprise on ``train_df`` only. Weights stay frozen."""
@@ -69,7 +69,6 @@ class LeWMFilter(RegimeFilter):
 
         self._features.reset()
         self._rows = []
-        self._prev_online_z = None
 
     def update(self, obs: Bar) -> FilterState:
         extras = obs.extras or {}
@@ -82,21 +81,23 @@ class LeWMFilter(RegimeFilter):
             volume=_maybe(extras, "volume"),
         )
         self._rows.append(row)
-        if len(self._rows) > self.seq_len:
-            self._rows = self._rows[-self.seq_len :]
-        window = self._scaled_window()
+        keep = self.seq_len + self.pred_hop
+        if len(self._rows) > keep:
+            self._rows = self._rows[-keep :]
+        window = self._scaled_rows(self._rows[-self.seq_len :])
         features = torch.as_tensor(window, dtype=torch.float32).unsqueeze(0)
         with torch.no_grad():
             z_online = self.model.encode(features)
-            z_target = self.model.target_encoder(features)
-            if self._prev_online_z is None:
-                raw_surprise = 0.0
+            if len(self._rows) >= keep:
+                previous = self._scaled_rows(self._rows[: self.seq_len])
+                previous_features = torch.as_tensor(previous, dtype=torch.float32).unsqueeze(0)
+                z_prev = self.model.encode(previous_features)
+                z_target = self.model.target_encoder(features)
+                predicted = self.model.predictor(z_prev)
+                raw_surprise = float(torch.linalg.vector_norm(predicted - z_target, ord=2).item())
             else:
-                predicted = self.model.predictor(self._prev_online_z)
-                error = predicted - z_target
-                raw_surprise = float(torch.linalg.vector_norm(error, ord=2).item())
+                raw_surprise = 0.0
             latent = z_online.squeeze(0).detach().cpu().numpy().astype(np.float64)
-            self._prev_online_z = z_online.detach()
         pred_vol = max(self.vol_head.predict(latent), 1e-8)
         logit = float(np.clip(self.regime_head.predict(latent), -40.0, 40.0))
         regime_prob = float(1.0 / (1.0 + np.exp(-logit)))
@@ -107,12 +108,12 @@ class LeWMFilter(RegimeFilter):
             pred_vol=pred_vol,
         )
 
-    def _scaled_window(self) -> np.ndarray:
-        rows = list(self._rows)
-        if len(rows) < self.seq_len:
+    def _scaled_rows(self, rows: list[np.ndarray]) -> np.ndarray:
+        window = list(rows)
+        if len(window) < self.seq_len:
             pad = np.array(self.feature_mean, dtype=np.float64, copy=True)
-            rows = [pad for _ in range(self.seq_len - len(rows))] + rows
-        raw = np.stack(rows).astype(np.float64)
+            window = [pad for _ in range(self.seq_len - len(window))] + window
+        raw = np.stack(window[-self.seq_len :]).astype(np.float64)
         return (raw - self.feature_mean) / self.feature_std
 
 
