@@ -60,19 +60,14 @@ def _state_matrix(states: list[FilterState]) -> np.ndarray:
     )
 
 
-@pytest.mark.parametrize("filter_cls", _FILTERS)
-@pytest.mark.parametrize("strategy_cls", _STRATEGIES)
-def test_prefix_is_invariant_to_future(filter_cls: type, strategy_cls: type) -> None:
-    n_steps = 180
-    t_cut = 100
+def _assert_prefix_invariant(make_filter, strategy_cls: type, n_steps: int = 180, t_cut: int = 100) -> None:
     original = generate_pair_series(n_steps, seed=7)
     perturbed = _perturb_tail(original, t_cut)
     pd.testing.assert_frame_equal(original.iloc[: t_cut + 1], perturbed.iloc[: t_cut + 1])
 
     def run(frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-        filt = filter_cls()
+        filt = make_filter()
         strategy = strategy_cls(surprise_scale=1.0, surprise_threshold=0.5, regime_cutoff=0.8)
-        # Fit on the shared prefix only, then replay the whole path online.
         filt.fit(frame.iloc[: t_cut + 1])
         if isinstance(filt, HMMFilter):
             assert filt.stds_ is not None
@@ -88,6 +83,32 @@ def test_prefix_is_invariant_to_future(filter_cls: type, strategy_cls: type) -> 
     np.testing.assert_allclose(positions_a[prefix], positions_b[prefix], atol=0.0, rtol=0.0)
     assert states_a[tail].shape[0] > 0
     assert not np.allclose(states_a[tail], states_b[tail], atol=0.0, rtol=0.0)
+
+
+@pytest.mark.parametrize("filter_cls", _FILTERS)
+@pytest.mark.parametrize("strategy_cls", _STRATEGIES)
+def test_prefix_is_invariant_to_future(filter_cls: type, strategy_cls: type) -> None:
+    _assert_prefix_invariant(filter_cls, strategy_cls)
+
+
+@pytest.fixture(scope="module")
+def tiny_lewm_checkpoint(tmp_path_factory: pytest.TempPathFactory):
+    pytest.importorskip("torch")
+    from lewm_harness.world_model.train import TrainConfig, resolve_device, run_training, synthetic_frame
+
+    path = tmp_path_factory.mktemp("lewm") / "checkpoint.pt"
+    config = TrainConfig(epochs=1, n_steps=256, batch_size=64, seed=0)
+    run_training(config, synthetic_frame(config.n_steps, config.seed), path, resolve_device("cpu"), False)
+    return path
+
+
+@pytest.mark.parametrize("strategy_cls", _STRATEGIES)
+def test_lewm_prefix_is_invariant_to_future(strategy_cls: type, tiny_lewm_checkpoint) -> None:
+    torch = pytest.importorskip("torch")
+    torch.set_num_threads(1)
+    from lewm_harness.filters.lewm import LeWMFilter
+
+    _assert_prefix_invariant(lambda: LeWMFilter(tiny_lewm_checkpoint), strategy_cls)
 
 
 def _batch_forward_and_smooth(

@@ -10,7 +10,7 @@ At decision time `t` the engine builds one `Bar` from row `t` and passes it to `
 
 The HMM reports `P(high-vol | observations through t)` from the forward algorithm. There is no backward pass and no Viterbi decode. `stds_[0]` is the low-vol emission and `stds_[1]` is the high-vol emission.
 
-`LeWMFilter.update` raises `NotImplementedError`. Phase 2 should load a PyTorch checkpoint, replay the training frame causally, and call `calibrate_surprise` so the stub lands on the same overlay as the classical filters.
+`LeWMFilter` loads a PyTorch checkpoint (`pip install -e ".[ml]"`). `fit` does not train the network. It replays the training slice and calls `calibrate_surprise`, so latent prediction error uses the same z-score as Kalman and HMM. `pred_vol` and `regime_prob` come from the frozen Gate 1 linear heads. The rolling window in `update` contains only bars up to the current one.
 
 ## Overlay
 
@@ -54,7 +54,17 @@ python3 -m pytest -v
 python3 scripts/run_benchmark.py
 ```
 
-Optional flags: `--paths`, `--steps`, `--seed`, `--fee-bps`, `--wf-steps`, `--wf-train`, `--wf-test`, `--periods-per-year`.
+The world model is an optional extra. It trains on CPU without a GPU:
+
+```bash
+python3 -m pip install -e ".[ml]"
+python3 scripts/train_lewm.py --synthetic-smoke --device cpu --epochs 2 --out checkpoint.pt
+python3 scripts/download_binance.py --symbols BTCUSDT ETHUSDT --interval 5m --start 2023-01 --end 2025-12 --out data/binance
+```
+
+`load_ohlcv_parquet` sets `frame.attrs["periods_per_year"]` (`365 * 24 * 12` for 5-minute bars). Pass that into `run_walk_forward` and `compute_metrics`.
+
+Optional benchmark flags: `--paths`, `--steps`, `--seed`, `--fee-bps`, `--wf-steps`, `--wf-train`, `--wf-test`, `--periods-per-year`.
 
 ## Benchmark
 

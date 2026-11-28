@@ -7,14 +7,14 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from lewm_harness.engine.bars import EXCLUDED_COLUMNS, make_bar
 from lewm_harness.engine.metrics import PerformanceMetrics
 from lewm_harness.filters.base import RegimeFilter
 from lewm_harness.strategies.base import Strategy
-from lewm_harness.types import Bar, FilterState
+from lewm_harness.types import FilterState
 
-# Labels are an evaluation column, never a feature. Anything else other
-# than the core bar fields is copied onto Bar.extras for the current row.
-_EXCLUDED_COLUMNS = frozenset({"ts", "close", "ret", "true_regime"})
+# Re-exported so existing readers of this module still see the column rule.
+_EXCLUDED_COLUMNS = EXCLUDED_COLUMNS
 
 
 @dataclass
@@ -64,13 +64,7 @@ def run_backtest(
     if n_rows < 2:
         raise ValueError("backtest frame must contain at least 2 rows")
 
-    timestamps = df["ts"].to_numpy()
-    closes = df["close"].to_numpy(dtype=np.float64)
     returns = df["ret"].to_numpy(dtype=np.float64)
-    extra_names = [name for name in df.columns if name not in _EXCLUDED_COLUMNS]
-    extras = {
-        name: df[name].to_numpy(dtype=np.float64) for name in extra_names
-    }
 
     filt.reset()
     strategy.reset()
@@ -83,13 +77,7 @@ def run_backtest(
     fee_rate = fee_bps * 1e-4
 
     for t in range(n_decisions):
-        bar_extras = {name: float(extras[name][t]) for name in extra_names} or None
-        bar = Bar(
-            ts=int(timestamps[t]),
-            close=float(closes[t]),
-            ret=float(returns[t]),
-            extras=bar_extras,
-        )
+        bar = make_bar(df, t)
         state = filt.update(bar)
         position = float(np.clip(strategy.step(bar, state), -1.0, 1.0))
         pnl[t] = position * float(returns[t + 1]) - fee_rate * abs(position - previous)
