@@ -58,11 +58,13 @@ The world model is an optional extra. It trains on CPU without a GPU:
 
 ```bash
 python3 -m pip install -e ".[ml]"
-python3 scripts/train_lewm.py --synthetic-smoke --device cpu --epochs 2 --out checkpoint.pt
+python3 scripts/train_lewm.py --synthetic-smoke --device cpu --epochs 2 --pred-hop 1 --out checkpoint.pt
 python3 scripts/download_binance.py --symbols BTCUSDT ETHUSDT --interval 5m --start 2023-01 --end 2025-12 --out data/binance
 ```
 
 `load_ohlcv_parquet` sets `frame.attrs["periods_per_year"]` (`365 * 24 * 12` for 5-minute bars). Pass that into `run_walk_forward` and `compute_metrics`.
+
+`--pred-hop` (default 1) is the bar shift from a context window to the JEPA target window. Gate 1 does not use that hop. It scores the next full window: the `seq_len` bars that start when the context window ends. Those two horizons are different on purpose. Training writes `best.pt` from validation vol R² (tie-break: validation loss) and `last.pt` from the final epoch. A history CSV records `epoch, train_loss, val_loss, val_vol_r2, val_regime_auc`. The test tail is not used to pick the epoch. `--patience` (default 5) stops after that many epochs without a better validation score.
 
 Optional benchmark flags: `--paths`, `--steps`, `--seed`, `--fee-bps`, `--wf-steps`, `--wf-train`, `--wf-test`, `--periods-per-year`.
 
@@ -83,3 +85,34 @@ mean_reversion       hmm    -0.0920         0.6951       -1.3560       0.7209   
       stat_arb    kalman     1.7884         0.4036        1.1548       0.1978     1.9403     2.8965     0.0583
       stat_arb       hmm     1.7824         0.5328        1.1239       0.1758     1.8588     1.5400     0.0866
 ```
+
+## Phase 3: Real-data walk-forward
+
+Each window trains only on its past months. A validation tail (`val_frac` 0.1 by default) is carved from the end of that train block, with an embargo of `2 * seq_len` bars so train labels and JEPA targets do not touch validation. The test months are held out of the scaler, the optimizer, the probe fit, and the epoch choice. LeWM surprise z-scores and `reference_vol_` are fit on that validation tail, not on the bars the encoder trained on. If the file has no `spread` column, the runner adds a trailing close deviation that uses only past bars, so the pairs strategy can run on a single symbol. `--data` must not contain more than one symbol folder.
+
+On a Kaggle T4, write outputs under `/kaggle/working` and turn on mixed precision (`--amp` uses fp16 on a T4 and bf16 on Ampere or newer):
+
+```bash
+python scripts/download_binance.py --symbols BTCUSDT ETHUSDT --interval 5m --start 2023-01 --end 2025-12 --out /kaggle/working/data
+python scripts/train_lewm.py --data /kaggle/working/data/BTCUSDT/5m --device cuda --amp --epochs 20 --pred-hop 1 --patience 5 --out /kaggle/working/lewm
+python scripts/run_walk_forward.py --data /kaggle/working/data/BTCUSDT/5m --device cuda --amp --epochs 20 --seeds 0 1 2 --train-months 6 --test-months 1 --step-months 1 --pred-hop 1 --out /kaggle/working/walk_forward
+```
+
+`--reuse-checkpoints` skips a finished `(window, seed)` only when `config.json` hashes to the same `TrainConfig`, window start/end timestamps, train-data fingerprint, and seed. Checkpoints and CSV files are replaced atomically. The summary is mean and std Sharpe across windows and seeds, the 5th percentile Sharpe, the worst max drawdown, and mean turnover. It prints LeWM minus each baseline, with N, the per-window deltas, and a sign count. A bootstrap 95% interval is included only when N is at least 8. `summary.txt` also records `periods_per_year` and the median bar spacing. `--interval` must agree with that spacing within 1%.
+
+Results below are a placeholder until that Kaggle run is filled in.
+
+| strategy | filter | sharpe_mean | sharpe_std | sharpe_p5 | max_drawdown | turnover |
+| --- | --- | --- | --- | --- | --- | --- |
+| mean_reversion | identity | — | — | — | — | — |
+| mean_reversion | kalman | — | — | — | — | — |
+| mean_reversion | hmm | — | — | — | — | — |
+| mean_reversion | lewm | — | — | — | — | — |
+| momentum | identity | — | — | — | — | — |
+| momentum | kalman | — | — | — | — | — |
+| momentum | hmm | — | — | — | — | — |
+| momentum | lewm | — | — | — | — | — |
+| stat_arb | identity | — | — | — | — | — |
+| stat_arb | kalman | — | — | — | — | — |
+| stat_arb | hmm | — | — | — | — | — |
+| stat_arb | lewm | — | — | — | — | — |

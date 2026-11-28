@@ -62,6 +62,8 @@ def evaluate_gate1(
     train_end: int,
     seq_len: int,
     device: torch.device,
+    eval_start: int | None = None,
+    eval_end: int | None = None,
 ) -> Gate1Report:
     """Probe next-window realized volatility and a high-vol indicator.
 
@@ -72,8 +74,10 @@ def evaluate_gate1(
     """
 
     model.eval()
-    train_starts = np.arange(0, train_end - 2 * seq_len + 1)
-    test_starts = np.arange(train_end, len(scaled) - 2 * seq_len + 1)
+    score_start = train_end if eval_start is None else eval_start
+    score_end = len(scaled) if eval_end is None else eval_end
+    train_starts = _label_starts(0, train_end, seq_len)
+    test_starts = _label_starts(score_start, score_end, seq_len)
     if train_starts.size < 4 or test_starts.size < 2:
         raise ValueError("not enough rows for a train and test probe split")
     z_train, y_train, base_train = _design(model, scaled, raw, train_starts, seq_len, device)
@@ -104,6 +108,15 @@ def evaluate_gate1(
         vol_head=vol_head,
         regime_head=regime_head,
     )
+
+
+def _label_starts(region_start: int, region_end: int, seq_len: int) -> np.ndarray:
+    """Context plus the next full window must both sit inside the region."""
+
+    last = region_end - 2 * seq_len
+    if last < region_start:
+        return np.array([], dtype=np.int64)
+    return np.arange(region_start, last + 1, dtype=np.int64)
 
 
 def _design(

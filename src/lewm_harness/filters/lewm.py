@@ -19,22 +19,25 @@ from lewm_harness.filters.base import RegimeFilter
 from lewm_harness.types import Bar, FilterState
 from lewm_harness.world_model.features import OnlineFeatureState
 from lewm_harness.world_model.probes import LinearHead
-from lewm_harness.world_model.train import head_from_blob, load_checkpoint
+from lewm_harness.world_model.train import head_from_blob, load_checkpoint, make_time_split
 
 
 class LeWMFilter(RegimeFilter):
     """Online world-model filter loaded from ``checkpoint.pt``."""
 
-    def __init__(self, checkpoint_path: str | Path) -> None:
+    def __init__(self, checkpoint_path: str | Path, device: str | torch.device | None = None) -> None:
         super().__init__()
         path = Path(checkpoint_path)
         if not path.is_file():
             raise FileNotFoundError(f"LeWM checkpoint not found: {path}")
         self.checkpoint_path = path
-        self.model, blob = load_checkpoint(path)
+        self.device = torch.device("cpu" if device is None else device)
+        self.model, blob = load_checkpoint(path, device=self.device)
         self.model.eval()
         config = blob["config"]
         self.seq_len = int(config["seq_len"])
+        self.pred_hop = int(config.get("pred_hop", 1))
+        self.val_frac = float(config.get("val_frac", 0.1))
         self.vol_window = int(config["vol_window"])
         self.feature_mean = np.asarray(blob["feature_mean"], dtype=np.float64)
         self.feature_std = np.asarray(blob["feature_std"], dtype=np.float64)
@@ -44,10 +47,15 @@ class LeWMFilter(RegimeFilter):
         self.regime_head: LinearHead = head_from_blob(blob["regime_head"])
         self._features = OnlineFeatureState(self.vol_window, self.log_volume_mean, self.log_volume_std)
         self._rows: list[np.ndarray] = []
-        self._prev_online_z: torch.Tensor | None = None
 
     def fit(self, train_df: pd.DataFrame) -> None:
-        """Z-score latent surprise on ``train_df`` only. Weights stay frozen."""
+        """Z-score surprise on the held-out validation tail only.
+
+        The replay is causal and batched on ``self.device``, but the mean,
+        standard deviation, and ``reference_vol_`` use rows in the validation
+        tail. Encoder-training bars and the embargo are context for the
+        rolling window, not calibration samples. Weights stay frozen.
+        """
 
         if "ret" not in train_df.columns or "close" not in train_df.columns:
             raise ValueError("LeWMFilter.fit expected close and ret columns")
@@ -55,13 +63,11 @@ class LeWMFilter(RegimeFilter):
         self._surprise_std = None
         self.reference_vol_ = None
         self.reset()
-        raw = np.empty(len(train_df), dtype=np.float64)
-        vols = np.empty(len(train_df), dtype=np.float64)
-        for index in range(len(train_df)):
-            state = self.update(make_bar(train_df, index))
-            raw[index] = state.surprise
-            vols[index] = state.pred_vol
-        self.calibrate_surprise(raw, vols)
+        raw, vols = self._replay_series(train_df)
+        start, end = _calibration_bounds(len(train_df), self.seq_len, self.pred_hop, self.val_frac)
+        if end <= start:
+            start, end = 0, len(train_df)
+        self.calibrate_surprise(raw[start:end], vols[start:end])
         self.reset()
 
     def reset(self) -> None:
@@ -69,7 +75,6 @@ class LeWMFilter(RegimeFilter):
 
         self._features.reset()
         self._rows = []
-        self._prev_online_z = None
 
     def update(self, obs: Bar) -> FilterState:
         extras = obs.extras or {}
@@ -82,21 +87,23 @@ class LeWMFilter(RegimeFilter):
             volume=_maybe(extras, "volume"),
         )
         self._rows.append(row)
-        if len(self._rows) > self.seq_len:
-            self._rows = self._rows[-self.seq_len :]
-        window = self._scaled_window()
-        features = torch.as_tensor(window, dtype=torch.float32).unsqueeze(0)
+        keep = self.seq_len + self.pred_hop
+        if len(self._rows) > keep:
+            self._rows = self._rows[-keep :]
+        window = self._scaled_rows(self._rows[-self.seq_len :])
+        features = torch.as_tensor(window, dtype=torch.float32, device=self.device).unsqueeze(0)
         with torch.no_grad():
             z_online = self.model.encode(features)
-            z_target = self.model.target_encoder(features)
-            if self._prev_online_z is None:
-                raw_surprise = 0.0
+            if len(self._rows) >= keep:
+                previous = self._scaled_rows(self._rows[: self.seq_len])
+                previous_features = torch.as_tensor(previous, dtype=torch.float32, device=self.device).unsqueeze(0)
+                z_prev = self.model.encode(previous_features)
+                z_target = self.model.target_encoder(features)
+                predicted = self.model.predictor(z_prev)
+                raw_surprise = float(torch.linalg.vector_norm(predicted - z_target, ord=2).item())
             else:
-                predicted = self.model.predictor(self._prev_online_z)
-                error = predicted - z_target
-                raw_surprise = float(torch.linalg.vector_norm(error, ord=2).item())
+                raw_surprise = 0.0
             latent = z_online.squeeze(0).detach().cpu().numpy().astype(np.float64)
-            self._prev_online_z = z_online.detach()
         pred_vol = max(self.vol_head.predict(latent), 1e-8)
         logit = float(np.clip(self.regime_head.predict(latent), -40.0, 40.0))
         regime_prob = float(1.0 / (1.0 + np.exp(-logit)))
@@ -107,12 +114,64 @@ class LeWMFilter(RegimeFilter):
             pred_vol=pred_vol,
         )
 
-    def _scaled_window(self) -> np.ndarray:
-        rows = list(self._rows)
-        if len(rows) < self.seq_len:
+    def _replay_series(self, frame: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        """Causal windows for every row, encoded in batches."""
+
+        features = OnlineFeatureState(self.vol_window, self.log_volume_mean, self.log_volume_std)
+        rows: list[np.ndarray] = []
+        for index in range(len(frame)):
+            bar = make_bar(frame, index)
+            extras = bar.extras or {}
+            rows.append(
+                features.update(
+                    ret=float(bar.ret),
+                    close=float(bar.close),
+                    high=_maybe(extras, "high"),
+                    low=_maybe(extras, "low"),
+                    open_=_maybe(extras, "open"),
+                    volume=_maybe(extras, "volume"),
+                )
+            )
+        current = np.stack([self._window_ending_at(rows, index) for index in range(len(rows))])
+        latent = self._encode(current, target=False)
+        raw = np.zeros(len(rows), dtype=np.float64)
+        first = self.seq_len + self.pred_hop - 1
+        if first < len(rows):
+            eligible = np.arange(first, len(rows))
+            previous = np.stack(
+                [self._window_ending_at(rows, int(index) - self.pred_hop) for index in eligible]
+            )
+            z_prev = torch.as_tensor(self._encode(previous, target=False), dtype=torch.float32, device=self.device)
+            z_target = self._encode(current[eligible], target=True)
+            predicted = self.model.predictor(z_prev).detach().cpu().numpy()
+            raw[eligible] = np.linalg.norm(predicted - z_target, axis=1)
+        scaled = (latent - self.vol_head.mean) / self.vol_head.scale
+        pred_vol = np.maximum(scaled @ self.vol_head.coef + self.vol_head.intercept, 1e-8)
+        return raw, pred_vol
+
+    def _window_ending_at(self, rows: list[np.ndarray], end_inclusive: int) -> np.ndarray:
+        start = end_inclusive - self.seq_len + 1
+        chunk = rows[max(0, start) : end_inclusive + 1]
+        return self._scaled_rows(chunk)
+
+    def _encode(self, windows: np.ndarray, *, target: bool) -> np.ndarray:
+        outputs: list[np.ndarray] = []
+        with torch.no_grad():
+            for start in range(0, len(windows), 256):
+                batch = torch.as_tensor(windows[start : start + 256], dtype=torch.float32, device=self.device)
+                if target:
+                    latent = self.model.target_encoder(batch)
+                else:
+                    latent = self.model.encode(batch)
+                outputs.append(latent.detach().cpu().numpy().astype(np.float64))
+        return np.concatenate(outputs, axis=0)
+
+    def _scaled_rows(self, rows: list[np.ndarray]) -> np.ndarray:
+        window = list(rows)
+        if len(window) < self.seq_len:
             pad = np.array(self.feature_mean, dtype=np.float64, copy=True)
-            rows = [pad for _ in range(self.seq_len - len(rows))] + rows
-        raw = np.stack(rows).astype(np.float64)
+            window = [pad for _ in range(self.seq_len - len(window))] + window
+        raw = np.stack(window[-self.seq_len :]).astype(np.float64)
         return (raw - self.feature_mean) / self.feature_std
 
 
@@ -120,6 +179,17 @@ def _maybe(extras: dict[str, float], key: str) -> float | None:
     if key not in extras:
         return None
     return float(extras[key])
+
+
+def _calibration_bounds(n_rows: int, seq_len: int, pred_hop: int, val_frac: float) -> tuple[int, int]:
+    """Validation tail used for surprise moments. Encoder-training rows are excluded."""
+
+    try:
+        split = make_time_split(n_rows, seq_len, pred_hop, train_frac=1.0, val_frac=val_frac)
+    except ValueError:
+        val_len = min(n_rows, max(2, int(round(n_rows * val_frac))))
+        return n_rows - val_len, n_rows
+    return split.val_start, split.test_start
 
 
 def _optional_float(value: object) -> float | None:
